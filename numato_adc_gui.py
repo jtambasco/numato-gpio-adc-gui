@@ -129,15 +129,22 @@ class Plotter(Qt.QObject):
 
     def __init__(self, data_buffer_size, sample_rate_ms, num_adcs):
         Qt.QObject.__init__(self)
+
+        self.temp_data_filename = '.temp_log.dat'
+        with open(self.temp_data_filename, 'w') as fs:
+            pass
+
         self.start_time = time.time()
         self.data_buffer_size = data_buffer_size
         self.sample_rate_ms = sample_rate_ms
         self.num_adcs = num_adcs
         self.time_deque = col.deque([], self.data_buffer_size)
         self.data_deques = []
+
         for i in range(self.num_adcs):
             self.data_deques.append(col.deque([], self.data_buffer_size))
         self.get_data_flag = True
+
         self.data_thread = threading.Thread(target=self.get_data)
         self.data_thread.start()
 
@@ -155,7 +162,16 @@ class Plotter(Qt.QObject):
         d = []
         for i in range(self.num_adcs):
             d.append(np.array(self.data_deques[i])[:max_len])
+
+        save_arr = []
+        save_arr.append(t)
+        save_arr.extend(d)
+        save_arr = np.array(save_arr)
+        with open(self.temp_data_filename, 'ab') as fs:
+            np.savetxt(fs, save_arr.T, '%.4e', ',')
+
         self.return_fig.emit(t, d)
+
         self.time_deque = col.deque([], self.data_buffer_size)
         self.data_deques = []
         for i in range(self.num_adcs):
