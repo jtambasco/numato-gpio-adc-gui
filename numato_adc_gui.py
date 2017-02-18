@@ -23,10 +23,13 @@ class NumatoAdcGui(base_class, form_class):
         super().__init__()
         self.setupUi(self)
 
+        self.num_adcs = 6
+
         self.adc_plot_curves = []
-        for i in range(6):
+        for i in range(self.num_adcs):
             self.adc_plot_curves.append(self.adc_plot.plot())
             setattr(self, 'adc_plot_curve_%i' % i, self.adc_plot_curves[i])
+
 
         self._update_plot_timer = Qt.QTimer()
         self._update_plot_timer.timeout.connect(self.update)
@@ -37,20 +40,37 @@ class NumatoAdcGui(base_class, form_class):
         self._timer_running = True
         self.start_stop.clicked.connect(self.toggle_update_plot_timer)
 
+        self.adc_checkboxes = [getattr(self, 'adc_%i' % i) for i in range(self.num_adcs)]
+        for adc_checkbox in self.adc_checkboxes:
+            adc_checkbox.stateChanged.connect(self.clear_curve)
+
         # set plot defaults
         self.adc_plot.setLimits(yMin=0, yMax=10)
 
         # plotter and thread are none at the beginning
         self._data_buffer_size = int(self.data_buffer_size_samples.text())
-        self._time_deque = col.deque([], self._data_buffer_size)
-        self._data_deque = col.deque([], self._data_buffer_size)
-        self.plotter = Plotter(self._data_buffer_size, float(self.sample_rate_ms.text()))
+
+
+        self.time_deque = col.deque([], self._data_buffer_size)
+        self.data_deques = []
+        for i in range(self.num_adcs):
+            self.data_deques.append(col.deque([], self._data_buffer_size))
+            setattr(self, 'data_deque_%i' % i, self._data_buffer_size)
+
+        self.plotter = Plotter(self._data_buffer_size, float(self.sample_rate_ms.text()),
+                               self.num_adcs)
         self.thread = Qt.QThread()
 
         self.send_fig.connect(self.plotter.replot)
         self.plotter.return_fig.connect(self.plot)
         self.plotter.moveToThread(self.thread)
         self.thread.start()
+
+    def clear_curve(self, toggle_state):
+        if not toggle_state:
+            obj_name = self.sender().objectName()
+            curve_idx = int(obj_name[-1])
+            self.adc_plot_curves[curve_idx].clear()
 
     def closeEvent(self, event):
         self.plotter.get_data_flag = False
@@ -75,25 +95,28 @@ class NumatoAdcGui(base_class, form_class):
     def set_data_buffer_size(self):
         data_buffer_size = int(self.data_buffer_size_samples.text())
         self._data_buffer_size = data_buffer_size
-        time_deque = self._time_deque
-        data_deque = self._data_deque
-        self._time_deque = col.deque(time_deque, self._data_buffer_size)
-        self._data_deque = col.deque(data_deque, self._data_buffer_size)
+        time_deque = self.time_deque
+        data_deques = []
+        for i in range(self.num_adcs):
+            data_deques.append(self.data_deques[i])
+        for i in range(self.num_adcs):
+            self.time_deque = col.deque(time_deque, self._data_buffer_size)
+            self.data_deques[i] = col.deque(data_deques[i], self._data_buffer_size)
         self.plotter.data_buffer_size = data_buffer_size
-        self.plotter.time_deque = col.deque(time_deque, self._data_buffer_size)
-        self.plotter.data_deque = col.deque(data_deque, self._data_buffer_size)
+        self.plotter.time_deque = self.time_deque
+        self.plotter.data_deques = self.data_deques
 
     def update(self):
         self.send_fig.emit(self._ticker)
 
-    def plot(self, time, data):
-        self._time_deque.extend(time)
-        self._data_deque.extend(data)
+    def plot(self, times, datas):
+        self.time_deque.extend(times)
+        for i in range(self.num_adcs):
+            self.data_deques[i].extend(datas[i])
         active_plots = self.get_active_plots()
         active_idxs = np.where(active_plots)[0]
         for idx in active_idxs:
-            self.adc_plot_curves[idx].setData(self._time_deque,
-                                              self._data_deque+idx)
+            self.adc_plot_curves[idx].setData(self.time_deque, self.data_deques[idx])
 
     def get_active_plots(self):
         active_plots_lst = []
@@ -104,14 +127,16 @@ class NumatoAdcGui(base_class, form_class):
 class Plotter(Qt.QObject):
     return_fig = Qt.pyqtSignal(object, object)
 
-    def __init__(self, data_buffer_size, sample_rate_ms):
+    def __init__(self, data_buffer_size, sample_rate_ms, num_adcs):
         Qt.QObject.__init__(self)
-
         self.start_time = time.time()
         self.data_buffer_size = data_buffer_size
         self.sample_rate_ms = sample_rate_ms
-        self.time_deque = col.deque([], data_buffer_size)
-        self.data_deque = col.deque([], data_buffer_size)
+        self.num_adcs = num_adcs
+        self.time_deque = col.deque([], self.data_buffer_size)
+        self.data_deques = []
+        for i in range(self.num_adcs):
+            self.data_deques.append(col.deque([], self.data_buffer_size))
         self.get_data_flag = True
         self.data_thread = threading.Thread(target=self.get_data)
         self.data_thread.start()
@@ -119,19 +144,25 @@ class Plotter(Qt.QObject):
     def get_data(self):
         while self.get_data_flag:
             self.time_deque.append(time.time()-self.start_time)
-            self.data_deque.append(np.random.rand(1)[0])
+            for i in range(self.num_adcs):
+                self.data_deques[i].append(np.random.rand(1)[0])
+            time.sleep(self.sample_rate_ms/1000.)
 
     @Qt.pyqtSlot(str)
     def replot(self, ticker):
-        time_deque = self.time_deque
-        data_deque = self.data_deque
+        max_len = len(self.data_deques[-1]) - 1
+        t = np.array(self.time_deque)[:max_len]
+        d = []
+        for i in range(self.num_adcs):
+            d.append(np.array(self.data_deques[i])[:max_len])
+        self.return_fig.emit(t, d)
         self.time_deque = col.deque([], self.data_buffer_size)
-        self.data_deque = col.deque([], self.data_buffer_size)
-        self.return_fig.emit(time_deque, data_deque)
+        self.data_deques = []
+        for i in range(self.num_adcs):
+            self.data_deques.append(col.deque([], self.data_buffer_size))
 
 if __name__ == '__main__':
     app = QtWidgets.QApplication(sys.argv)
     myWindow = NumatoAdcGui()
     myWindow.show()
     app.exec_()
-
